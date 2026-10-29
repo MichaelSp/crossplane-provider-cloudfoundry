@@ -41,6 +41,8 @@ func main() {
 
 		enableManagementPolicies = app.Flag("enable-management-policies", "Enable support for Management Policies.").Default("true").Envar("ENABLE_MANAGEMENT_POLICIES").Bool()
 
+		enableKubernetesAppBackend = app.Flag("enable-kubernetes-app-backend", "Reconcile App resources onto a Kubernetes cluster (Deployment) instead of Cloud Foundry. Docker-lifecycle Apps only.").Default("false").Envar("ENABLE_KUBERNETES_APP_BACKEND").Bool()
+
 		scbMaxCreateAttempts = app.Flag("scb-max-create-attempts", "Consecutive ServiceCredentialBinding create attempts before creation is paused.").
 					Default(strconv.Itoa(servicecredentialbinding.DefaultMaxCreateAttempts)).Envar("SCB_MAX_CREATE_ATTEMPTS").Int()
 	)
@@ -112,6 +114,11 @@ func main() {
 	if *enableManagementPolicies {
 		o.Features.Enable(features.EnableBetaManagementPolicies)
 		log.Info("Alpha feature enabled", "flag", features.EnableBetaManagementPolicies)
+	}
+
+	if *enableKubernetesAppBackend {
+		o.Features.Enable(features.EnableKubernetesAppBackend)
+		log.Info("Alpha feature enabled", "flag", features.EnableKubernetesAppBackend)
 	}
 
 	kingpin.FatalIfError(provider.CustomSetup(mgr, o, provider.Config{SCBMaxCreateAttempts: *scbMaxCreateAttempts}), "Cannot setup custom controllers")

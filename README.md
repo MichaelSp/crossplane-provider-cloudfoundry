@@ -79,6 +79,34 @@ spec:
 
 Crossplane will create a deployment for the provider. Once it's healthy, configure your credentials and start orchestrating. 🚀
 
+### Kubernetes App backend
+
+`--enable-kubernetes-app-backend` (or `ENABLE_KUBERNETES_APP_BACKEND=true`)
+selects the experimental Kubernetes backend for **all App resources** handled by
+that provider process. It defaults off; other resource controllers still use CF.
+
+- Use a dedicated `ProviderConfig` with `credentials.source: Secret`; its
+  selected Secret key must contain a target-cluster kubeconfig, not CF credentials.
+  Credentials must be inline: executable plugins, auth providers and filesystem
+  credential paths are rejected.
+- Docker Apps become a Deployment and ClusterIP Service. The target namespace
+  must already exist. `spaceName` is the namespace; `spaceRef` and `spaceSelector`
+  use the referenced managed Space's **name**, never its CF GUID.
+- Workload names must satisfy portable Kubernetes Service naming rules. `PORT`
+  selects the container and Service port; the fallback is 8080. Web-process
+  instances and command configure replicas and the shell command. Environment
+  removals preserve variables injected by other controllers.
+- Registry credentials are copied into an owned target-cluster pull Secret and
+  reconciled on rotation/removal. Workloads are owned by the App's UID; collisions
+  never adopt or delete unrelated objects.
+- `external-name` pins `namespace/name`; rename or namespace changes are rejected.
+  `status.atProvider.guid` records the Deployment UID. Readiness requires the
+  current rollout to be fully available; zero replicas report `STOPPED`.
+- Buildpack staging and Ingress/Domain/Route translation are not supported.
+  Do not reference Kubernetes Apps from CF binding resources. Enabling the flag
+  does **not** migrate or delete existing CF Apps: legacy CF GUID external names
+  are rejected as a backend mismatch.
+
 ---
 
 ## 🔬 Developing

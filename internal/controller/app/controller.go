@@ -37,23 +37,35 @@ var (
 	errNotDockerApp    = "app is not a docker app, refusing to push a docker image over its existing lifecycle"
 	errDeleteResource  = "Cannot delete " + resourceKind + " in Cloud Foundry"
 	errSecret          = "Cannot extract credentials from secret"
+	errConnectK8s      = "Cannot connect to target Kubernetes cluster"
 )
 
 // Setup adds a controller that reconciles App resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(resourceKind)
 
+	kubernetesBackend := o.Features.Enabled(features.EnableKubernetesAppBackend)
+
 	options := []managed.ReconcilerOption{
 		managed.WithExternalConnector(
 			&connector{kube: mgr.GetClient(),
-				usage: resource.NewLegacyProviderConfigUsageTracker(mgr.GetClient(), &pcv1beta1.ProviderConfigUsage{}),
+				usage:             resource.NewLegacyProviderConfigUsageTracker(mgr.GetClient(), &pcv1beta1.ProviderConfigUsage{}),
+				kubernetesBackend: kubernetesBackend,
 			}),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
-		managed.WithInitializers(&spaceInitializer{
+	}
+
+	// The Kubernetes backend pins namespace/name only after ownership preflight;
+	// disable the reconciler's default NameAsExternalName initializer as well as
+	// CF space initialization.
+	if kubernetesBackend {
+		options = append(options, managed.WithInitializers())
+	} else {
+		options = append(options, managed.WithInitializers(&spaceInitializer{
 			kube: mgr.GetClient(),
-		}),
+		}))
 	}
 
 	if o.Features.Enabled(features.EnableBetaManagementPolicies) {
@@ -73,8 +85,9 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 
 // A connector supplies a function for the Reconciler to create a client to the external CloudFoundry resources.
 type connector struct {
-	kube  k8s.Client
-	usage resource.LegacyTracker
+	kube              k8s.Client
+	usage             resource.LegacyTracker
+	kubernetesBackend bool
 }
 
 // Connect typically produces an ExternalClient by:
@@ -83,12 +96,50 @@ type connector struct {
 // 3. Getting the credentials specified by the ProviderConfig.
 // 4. Using the credentials to form a client.
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	if _, ok := mg.(*v1alpha1.App); !ok {
+	cr, ok := mg.(*v1alpha1.App)
+	if !ok {
 		return nil, errors.New(errWrongKind)
+	}
+	if c.kubernetesBackend && cr.UID == "" {
+		return nil, errors.New("App UID is required for Kubernetes ownership")
 	}
 
 	if err := c.usage.Track(ctx, mg.(resource.LegacyManaged)); err != nil {
 		return nil, errors.Wrap(err, errTrackUsage)
+	}
+
+	// Kubernetes backend: materialize the App as a Deployment on a target
+	// cluster instead of pushing to Cloud Foundry. Selected by feature flag.
+	if c.kubernetesBackend {
+		var namespace string
+		pinned := meta.GetExternalName(cr)
+		if meta.WasDeleted(cr) && pinned != "" {
+			var valid bool
+			namespace, _, valid = parseExternalName(pinned)
+			if !valid {
+				return nil, errors.New("Kubernetes backend mismatch or invalid external-name: legacy CF GUIDs cannot be migrated or deleted by the Kubernetes backend")
+			}
+		} else {
+			var namespaceErr error
+			namespace, namespaceErr = resolveKubernetesNamespace(ctx, c.kube, cr)
+			if pinned != "" {
+				pinnedNS, _, valid := parseExternalName(pinned)
+				if !valid {
+					return nil, errors.New("Kubernetes backend mismatch or invalid external-name: legacy CF GUIDs cannot be migrated or deleted by the Kubernetes backend")
+				}
+				if namespaceErr != nil {
+					namespace, namespaceErr = pinnedNS, nil
+				}
+			}
+			if namespaceErr != nil && !(meta.WasDeleted(cr) && pinned == "") {
+				return nil, namespaceErr
+			}
+		}
+		kc, rt, err := newKubeBackendClient(ctx, c.kube, cr)
+		if err != nil {
+			return nil, errors.Wrap(err, errConnectK8s)
+		}
+		return &k8sExternal{target: kc, kube: c.kube, rt: rt, namespace: namespace}, nil
 	}
 
 	cf, err := clients.ClientFnBuilder(ctx, c.kube)(mg)
